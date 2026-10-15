@@ -1,4 +1,6 @@
 import streamlit as st
+from datetime import date
+from pawpal_system import Task, Pet, Owner, Scheduler
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 
@@ -44,7 +46,12 @@ pet_name = st.text_input("Pet name", value="Mochi")
 species = st.selectbox("Species", ["dog", "cat", "other"])
 
 st.markdown("### Tasks")
-st.caption("Add a few tasks. In your final version, these should feed into your scheduler.")
+st.caption(
+    "Pending tasks are considered by priority (high → medium → low), "
+    "then by scheduled time. Tasks must fit within the remaining "
+    "time budget. Tasks with fixed times cannot overlap; "
+    "tasks without a set time remain flexible."
+)
 
 if "tasks" not in st.session_state:
     st.session_state.tasks = []
@@ -57,32 +64,143 @@ with col2:
 with col3:
     priority = st.selectbox("Priority", ["low", "medium", "high"], index=2)
 
+has_time = st.checkbox("Set a scheduled time")
+scheduled_time = None
+
+if has_time:
+    scheduled_time = st.time_input("Scheduled time").strftime("%H:%M")
+
+frequency = st.selectbox(
+    "Repeat",
+    ["once", "daily", "weekly"],
+)
+
 if st.button("Add task"):
-    st.session_state.tasks.append(
-        {"title": task_title, "duration_minutes": int(duration), "priority": priority}
-    )
+    if task_title.strip():
+        task = Task(
+            task_title.strip(),
+            int(duration),
+            priority,
+            scheduled_time=scheduled_time,
+            frequency=frequency,
+        )
+        st.session_state.tasks.append(task)
+    else:
+        st.error("Please enter a task title.")
 
 if st.session_state.tasks:
     st.write("Current tasks:")
-    st.table(st.session_state.tasks)
+    st.table([
+        {
+            "Title": task.title,
+            "Duration (minutes)": task.duration_minutes,
+            "Priority": task.priority,
+            "Scheduled time": task.scheduled_time or "Not set",
+            "Completed": task.completed,
+            "Repeat": task.frequency,
+            "Due date": str(task.due_date),
+        }
+        for task in st.session_state.tasks
+    ])
 else:
     st.info("No tasks yet. Add one above.")
 
 st.divider()
 
+if st.session_state.tasks:
+    task_index = st.selectbox(
+        "Choose a task to mark complete",
+        options=range(len(st.session_state.tasks)),
+        format_func=lambda i: (
+            f"{i + 1}. {st.session_state.tasks[i].title}"
+        ),
+    )
+
+    if st.button("Mark complete"):
+        task = st.session_state.tasks[task_index]
+
+        if task.completed:
+            st.info("This task is already completed.")
+        elif task.due_date > date.today():
+            st.info(f"This task is next due on {task.due_date}.")
+        else:
+            task.mark_complete()
+            st.rerun()
+
 st.subheader("Build Schedule")
-st.caption("This button should call your scheduling logic once you implement it.")
+available_minutes = st.number_input(
+    "Available time (minutes)",
+    min_value=0,
+    max_value=1440,
+    value=60,
+)
 
 if st.button("Generate schedule"):
-    st.warning(
-        "Not implemented yet. Next step: create your scheduling logic (classes/functions) and call it here."
+    owner = Owner(owner_name)
+    pet = Pet(pet_name, species)
+
+    for task in st.session_state.tasks:
+        pet.add_task(task)
+
+    owner.add_pet(pet)
+    scheduler = Scheduler(owner)
+    plan = scheduler.build_daily_plan(int(available_minutes))
+    pending_tasks = scheduler.filter_tasks(
+        owner.get_all_tasks(),
+        completed=False,
     )
-    st.markdown(
-        """
-Suggested approach:
-1. Design your UML (draft).
-2. Create class stubs (no logic).
-3. Implement scheduling behavior.
-4. Connect your scheduler here and display results.
-"""
-    )
+    conflicts = scheduler.detect_conflicts(pending_tasks)
+
+    if conflicts:
+        with st.expander(
+            f"⚠️ Found {len(conflicts)} overlapping task pairs",
+            expanded=False,
+        ):
+            st.caption(
+                "These conflicts are among all pending tasks. "
+                "The generated plan skips overlapping tasks."
+            )
+            for first, second in conflicts:
+                st.warning(
+                    f"{first.title} ({first.scheduled_time}) overlaps with "
+                    f"{second.title} ({second.scheduled_time})."
+                )
+    skipped_tasks = [
+        task for task in pending_tasks
+        if task not in plan
+    ]
+
+    if skipped_tasks:
+        with st.expander(f"Tasks not selected ({len(skipped_tasks)})"):
+            st.caption(
+                "These tasks exceeded the remaining time budget "
+                "or overlapped with a selected task."
+            )
+            for task in skipped_tasks:
+                st.write(
+                    f"- {task.title} | {task.duration_minutes} minutes | "
+                    f"{task.priority} | {task.scheduled_time or 'Not set'}"
+                )
+    if plan:
+        st.write(f"Care plan for {pet.name}:")
+        st.caption(
+            "Pending tasks are considered by priority (high → medium → low), "
+            "then by scheduled time. Each task is included if it fits "
+            "within the remaining time budget."
+        )
+        st.table([
+            {
+                "Task": task.title,
+                "Minutes": task.duration_minutes,
+                "Priority": task.priority,
+                "Scheduled time": task.scheduled_time or "Not set",
+            }
+            for task in plan
+        ])
+
+        total_minutes = sum(task.duration_minutes for task in plan)
+        st.success(
+            f"Planned {total_minutes} of {available_minutes} available minutes."
+        )
+    else:
+        st.info("No pending tasks fit within the available time.")
